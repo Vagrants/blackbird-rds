@@ -7,6 +7,7 @@ Fetch AWS RDS metrics.
 import datetime
 
 from boto.ec2 import cloudwatch
+from boto import rds
 
 from blackbird.plugins import base
 
@@ -33,8 +34,100 @@ class ConcreteJob(base.JobBase):
             {'ReadThroughput': 'Average'},
             {'WriteThroughput': 'Average'},
         ]
+        self.instance_classes = {
+            'db.t1.micro': {
+                'vCPU': 1,
+                'ECU': 1,
+                'Memory': 0.615
+            },
+            'db.m1.small': {
+                'vCPU': 1,
+                'ECU': 1,
+                'Memory': 1.7
+            },
+            'db.m3.medium': {
+                'vCPU': 1,
+                'ECU': 3,
+                'Memory': 3.75
+            },
+            'db.m3.large': {
+                'vCPU': 2,
+                'ECU': 6.5,
+                'Memory': 7.5
+            },
+            'db.m3.xlarge': {
+                'vCPU': 4,
+                'ECU': 13,
+                'Memory': 15
+            },
+            'db.m3.2xlarge': {
+                'vCPU': 8,
+                'ECU': 26,
+                'Memory': 30
+            },
+            'db.r3.large': {
+                'vCPU': 2,
+                'ECU': 6.5,
+                'Memory': 15
+            },
+            'db.r3.xlarge': {
+                'vCPU': 4,
+                'ECU': 13,
+                'Memory': 30.5
+            },
+            'db.r3.2xlarge': {
+                'vCPU': 8,
+                'ECU': 26,
+                'Memory': 61
+            },
+            'db.r3.4xlarge': {
+                'vCPU': 16,
+                'ECU': 52,
+                'Memory': 122
+            },
+            'db.r3.8xlarge': {
+                'vCPU': 32,
+                'ECU': 104,
+                'Memory': 244
+            },
+            'db.m2.xlarge': {
+                'vCPU': 2,
+                'ECU': 6.5,
+                'Memory': 17.1
+            },
+            'db.m2.2xlarge': {
+                'vCPU': 4,
+                'ECU': 13,
+                'Memory': 34.2
+            },
+            'db.m2.4xlarge': {
+                'vCPU': 8,
+                'ECU': 26,
+                'Memory': 68.4
+            },
+            'db.cr1.8xlarge': {
+                'vCPU': 32,
+                'ECU': 88,
+                'Memory': 244
+            },
+            'db.m1.medium': {
+                'vCPU': 1,
+                'ECU': 2,
+                'Memory': 3.75
+            },
+            'db.m1.large': {
+                'vCPU': 2,
+                'ECU': 4,
+                'Memory': 7.5
+            },
+            'db.m1.xlarge': {
+                'vCPU': 4,
+                'ECU': 8,
+                'Memory': 15
+            },
+        }
 
-    def _create_connection(self):
+    def _create_cloudwatch_connection(self):
         conn = cloudwatch.connect_to_region(
             self.options.get('region_name'),
             aws_access_key_id=self.options.get(
@@ -46,8 +139,61 @@ class ConcreteJob(base.JobBase):
         )
         return conn
 
-    def _fetch_metrics(self):
-        conn = self._create_connection()
+    def _create_rds_connection(self):
+        conn = rds.connect_to_region(
+            self.options.get('region_name'),
+            aws_access_key_id=self.options.get(
+                'aws_access_key_id'
+            ),
+            aws_secret_access_key=self.options.get(
+                'aws_secret_access_key'
+            )
+        )
+        return conn
+
+    def _fetch_instance(self):
+        """
+        Fetch RDS instance information by using boto.rds.
+        This method fetch following information.
+        * Allocate Disk Size
+        * Allocate Memory Size(by RDS instance class)
+        """
+        result = list()
+        conn = self._create_rds_connection()
+        hostname = self.options.get('hostname')
+
+        rds_instance = conn.get_all_dbinstances(
+            instance_id=self.options.get('db_instance_identifier')
+        )[0]
+        allocated_storage = getattr(rds_instance, 'allocated_storage', None)
+        instance_class = getattr(rds_instance, 'instance_class', None)
+        if instance_class in self.instance_classes:
+            allocated_memory = self.instance_classes[instance_class]['Memory']
+        else:
+            allocated_memory = None
+
+        if allocated_storage is not None:
+            allocated_storage = allocated_storage * 1024 * 1024 * 1024
+            result.append(
+                RDSItem(
+                    key='AllocatedStorage',
+                    value=str(allocated_storage),
+                    host=hostname
+                )
+            )
+        if allocated_memory is not None:
+            allocated_memory = allocated_memory * 1024 * 1024 * 1024
+            result.append(
+                RDSItem(
+                    key='AllocatedMemory',
+                    value=str(allocated_memory),
+                    host=hostname
+                )
+            )
+        return result
+
+    def _fetch_cloudwatch_metrics(self):
+        conn = self._create_cloudwatch_connection()
         result = list()
 
         ignore_metrics = self.options.get('ignore_metrics', list())
@@ -81,7 +227,7 @@ class ConcreteJob(base.JobBase):
                         dimensions=dimensions
                     )
                     if len(metric) > 0:
-                        result.append(RDSItem(
+                        result.append(CloudWatchRDSItem(
                             key=metric_name,
                             value=str(metric[0][statistics]),
                             host=hostname
@@ -104,7 +250,8 @@ class ConcreteJob(base.JobBase):
         Main loop
         """
         items = list()
-        items.extend(self._fetch_metrics())
+        items.extend(self._fetch_cloudwatch_metrics())
+        items.extend(self._fetch_instance())
         items.append(self._build_ping_item())
 
         for entry in items:
@@ -143,6 +290,31 @@ class RDSItem(base.ItemBase):
 
     def __init__(self, key, value, host):
         super(RDSItem, self).__init__(key, value, host)
+
+        self.__data = dict()
+        self._generate()
+
+    @property
+    def data(self):
+        """
+        Dequeued data.
+        """
+        return self.__data
+
+    def _generate(self):
+        self.__data['key'] = 'rds.{0}'.format(self.key)
+        self.__data['value'] = self.value
+        self.__data['host'] = self.host
+        self.__data['clock'] = self.clock
+
+
+class CloudWatchRDSItem(base.ItemBase):
+    """
+    Enqueued item.
+    """
+
+    def __init__(self, key, value, host):
+        super(CloudWatchRDSItem, self).__init__(key, value, host)
 
         self.__data = dict()
         self._generate()
@@ -196,14 +368,11 @@ if __name__ == '__main__':
         'interval': 60,
         'ignore_metrics': list()
     }
-    RESULTS = list()
     JOB = ConcreteJob(options=OPTIONS)
-    METRICS = JOB._fetch_metrics()
-    for ENTRY in METRICS:
-        RESULTS.append(
-            {
-                ENTRY.key: ENTRY.value
-            }
-        )
+    METRICS = JOB._fetch_cloudwatch_metrics()
+    METRICS.extend(JOB._fetch_instance())
+    RESULTS = [
+        ENTRY.data for ENTRY in METRICS
+    ]
 
     print(json.dumps(RESULTS))
