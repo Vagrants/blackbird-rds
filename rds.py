@@ -127,8 +127,8 @@ class ConcreteJob(base.JobBase):
             },
         }
 
-    def _create_cloudwatch_connection(self):
-        conn = cloudwatch.connect_to_region(
+    def _create_rds_connection(self):
+        conn = rds.connect_to_region(
             self.options.get('region_name'),
             aws_access_key_id=self.options.get(
                 'aws_access_key_id'
@@ -139,8 +139,8 @@ class ConcreteJob(base.JobBase):
         )
         return conn
 
-    def _create_rds_connection(self):
-        conn = rds.connect_to_region(
+    def _create_cloudwatch_connection(self):
+        conn = cloudwatch.connect_to_region(
             self.options.get('region_name'),
             aws_access_key_id=self.options.get(
                 'aws_access_key_id'
@@ -176,7 +176,7 @@ class ConcreteJob(base.JobBase):
             allocated_storage = allocated_storage * 1024 * 1024 * 1024
             result.append(
                 RDSItem(
-                    key='AllocatedStorage',
+                    key='storage.size[total]',
                     value=str(allocated_storage),
                     host=hostname
                 )
@@ -185,7 +185,7 @@ class ConcreteJob(base.JobBase):
             allocated_memory = allocated_memory * 1024 * 1024 * 1024
             result.append(
                 RDSItem(
-                    key='AllocatedMemory',
+                    key='memory.size[total]',
                     value=str(allocated_memory),
                     host=hostname
                 )
